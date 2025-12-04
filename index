@@ -1,0 +1,619 @@
+<!DOCTYPE html>
+<html lang="es">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>PLE Blueprint: Arquitecto de tu Aprendizaje</title>
+    <!-- Carga de Tailwind CSS -->
+    <script src="https://cdn.tailwindcss.com"></script>
+    <!-- Fuente Inter -->
+    <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;600;700&display=swap" rel="stylesheet">
+    <style>
+        body {
+            font-family: 'Inter', sans-serif;
+            background-color: #f7f7f7;
+        }
+        .accordion-content {
+            max-height: 0;
+            overflow: hidden;
+            transition: max-height 0.5s ease-in-out; /* Transición más suave */
+        }
+        .accordion-content.active {
+            max-height: 4000px; /* Suficientemente grande para el contenido extenso */
+        }
+        .inner-accordion-btn {
+            background-color: #f3f4f6; /* bg-gray-100 */
+            border-bottom: 1px solid #e5e7eb; /* border-gray-200 */
+        }
+    </style>
+    <!-- Importaciones de Firebase -->
+    <script type="module">
+        import { initializeApp } from "https://www.gstatic.com/firebasejs/11.6.1/firebase-app.js";
+        import { getAuth, signInAnonymously, signInWithCustomToken, onAuthStateChanged } from "https://www.gstatic.com/firebasejs/11.6.1/firebase-auth.js";
+        import { getFirestore, doc, getDoc, addDoc, setDoc, updateDoc, deleteDoc, onSnapshot, collection, query, where, getDocs } from "https://www.gstatic.com/firebasejs/11.6.1/firebase-firestore.js";
+
+        // Global variables provided by the environment
+        const appId = typeof __app_id !== 'undefined' ? __app_id : 'default-ple-app-id';
+        const firebaseConfig = typeof __firebase_config !== 'undefined' ? JSON.parse(__firebase_config) : {};
+        const initialAuthToken = typeof __initial_auth_token !== 'undefined' ? __initial_auth_token : null;
+
+        let app;
+        let db;
+        let auth;
+        let userId = null;
+        const COLLECTION_NAME = 'ple_tasks';
+
+        // Helper function for exponential backoff retry logic
+        const fetchWithRetry = async (fn, retries = 3, delay = 1000) => {
+            for (let i = 0; i < retries; i++) {
+                try {
+                    return await fn();
+                } catch (error) {
+                    if (i === retries - 1) throw error;
+                    await new Promise(resolve => setTimeout(resolve, delay * Math.pow(2, i)));
+                }
+            }
+        };
+
+        const initFirebase = async () => {
+            try {
+                app = initializeApp(firebaseConfig);
+                db = getFirestore(app);
+                auth = getAuth(app);
+
+                await fetchWithRetry(async () => {
+                    if (initialAuthToken) {
+                        await signInWithCustomToken(auth, initialAuthToken);
+                    } else {
+                        await signInAnonymously(auth);
+                    }
+                });
+
+                onAuthStateChanged(auth, (user) => {
+                    if (user) {
+                        userId = user.uid;
+                        document.getElementById('user-info').textContent = `ID de Usuario: ${userId}`;
+                        setupTaskListener();
+                    } else {
+                        userId = null;
+                        document.getElementById('user-info').textContent = 'Iniciando sesión...';
+                    }
+                });
+
+            } catch (error) {
+                console.error("Error al inicializar Firebase o autenticar:", error);
+                document.getElementById('task-container').innerHTML = '<p class="text-red-500">Error al cargar el sistema de tareas. Verifica la conexión.</p>';
+            }
+        };
+
+        const getTaskCollectionRef = () => {
+            if (!userId) {
+                console.error("User ID is not defined.");
+                return null;
+            }
+            // Private collection path
+            return collection(db, `artifacts/${appId}/users/${userId}/${COLLECTION_NAME}`);
+        };
+
+        const setupTaskListener = () => {
+            const tasksRef = getTaskCollectionRef();
+            if (!tasksRef) return;
+
+            onSnapshot(tasksRef, (snapshot) => {
+                const tasks = snapshot.docs.map(doc => ({
+                    id: doc.id,
+                    ...doc.data()
+                }));
+                renderTasks(tasks);
+            }, (error) => {
+                console.error("Error listening to tasks:", error);
+                document.getElementById('task-container').innerHTML = '<p class="text-red-500">Error al sincronizar las tareas.</p>';
+            });
+        };
+
+        const addTaskToDB = async (text) => {
+            const tasksRef = getTaskCollectionRef();
+            if (!tasksRef) return;
+
+            const newTask = {
+                text: text,
+                completed: false,
+                createdAt: new Date().toISOString()
+            };
+
+            try {
+                await fetchWithRetry(() => addDoc(tasksRef, newTask));
+            } catch (error) {
+                console.error("Error adding task:", error);
+            }
+        };
+
+        const toggleTaskInDB = async (taskId, currentStatus) => {
+            const taskDocRef = doc(db, `artifacts/${appId}/users/${userId}/${COLLECTION_NAME}`, taskId);
+
+            try {
+                await fetchWithRetry(() => updateDoc(taskDocRef, {
+                    completed: !currentStatus
+                }));
+            } catch (error) {
+                console.error("Error toggling task status:", error);
+            }
+        };
+
+        const renderTasks = (tasks) => {
+            const container = document.getElementById('task-container');
+            container.innerHTML = '';
+            
+            // Sort tasks: uncompleted first, then completed
+            tasks.sort((a, b) => {
+                if (a.completed !== b.completed) {
+                    return a.completed ? 1 : -1;
+                }
+                return new Date(a.createdAt) - new Date(b.createdAt);
+            });
+
+
+            if (tasks.length === 0) {
+                container.innerHTML = '<p class="text-gray-500 text-center py-4">¡Aún no tienes tareas! Empieza por las del Módulo 1.</p>';
+                return;
+            }
+
+            tasks.forEach(task => {
+                const taskElement = document.createElement('div');
+                taskElement.className = `flex items-center justify-between p-3 mb-2 rounded-lg transition duration-200 ${task.completed ? 'bg-green-100 border-l-4 border-green-500 line-through text-gray-500' : 'bg-white shadow-sm border-l-4 border-blue-500'}`;
+                taskElement.innerHTML = `
+                    <span class="flex-1 mr-4">${task.text}</span>
+                    <button 
+                        data-id="${task.id}" 
+                        data-completed="${task.completed}" 
+                        class="toggle-task p-2 rounded-full text-white transition duration-150 ${task.completed ? 'bg-green-500 hover:bg-green-600' : 'bg-gray-300 hover:bg-blue-400'}"
+                        title="${task.completed ? 'Marcar como pendiente' : 'Marcar como completada'}"
+                    >
+                        ${task.completed ? '✓' : '✗'}
+                    </button>
+                `;
+                container.appendChild(taskElement);
+            });
+
+            // Add event listeners to buttons
+            container.querySelectorAll('.toggle-task').forEach(button => {
+                button.addEventListener('click', (e) => {
+                    const id = e.currentTarget.dataset.id;
+                    const completed = e.currentTarget.dataset.completed === 'true';
+                    toggleTaskInDB(id, completed);
+                });
+            });
+        };
+
+        window.onload = initFirebase;
+        
+        // --- UI Logic ---
+        window.toggleAccordion = (element) => {
+            const content = document.getElementById(element);
+            
+            // Close others if open
+            document.querySelectorAll('.accordion-content').forEach(c => {
+                if (c.id !== element && c.classList.contains('active')) {
+                    c.classList.remove('active');
+                }
+            });
+
+            // Toggle current
+            if (content) {
+                content.classList.toggle('active');
+            }
+        };
+        
+        // Función para alternar la visibilidad de las cajas de ayuda
+        window.toggleHelp = (elementId) => {
+            const helpContent = document.getElementById(elementId);
+            if (helpContent) {
+                helpContent.classList.toggle('hidden');
+                helpContent.classList.toggle('block');
+            }
+        };
+
+        window.handleNewTask = () => {
+            const input = document.getElementById('new-task-input');
+            const text = input.value.trim();
+            if (text && userId) {
+                addTaskToDB(text);
+                input.value = '';
+            } else if (!userId) {
+                console.warn("Authentication not ready. Cannot add task.");
+            }
+        };
+
+        window.addEventListener('DOMContentLoaded', () => {
+            document.getElementById('add-task-btn').addEventListener('click', window.handleNewTask);
+            document.getElementById('new-task-input').addEventListener('keypress', (e) => {
+                if (e.key === 'Enter') {
+                    window.handleNewTask();
+                }
+            });
+        });
+
+    </script>
+</head>
+<body class="p-4 md:p-8">
+
+    <!-- Header y Contexto -->
+    <header class="mb-8 p-6 bg-blue-600 text-white rounded-xl shadow-lg">
+        <h1 class="text-3xl font-bold mb-2">PLE Blueprint: Arquitecto de tu Aprendizaje</h1>
+        <p class="text-blue-200 mb-4">¡Bienvenido! Este es tu plan guiado para diseñar tu entorno personal de aprendizaje (PLE). El objetivo es que aprendas a aprender de forma autónoma y estratégica.</p>
+        <p id="user-info" class="text-sm bg-blue-700 p-2 rounded-md inline-block">Conectando...</p>
+    </header>
+
+    <!-- Seguimiento de Tareas (Sticky en móvil) -->
+    <div class="fixed bottom-0 left-0 right-0 bg-white p-4 border-t-2 border-gray-200 z-10 md:static md:p-0 md:mb-8 md:border-none">
+        <h2 class="text-xl font-semibold text-gray-800 mb-3">🛠️ mi rastreador de tareas PLE</h2>
+        <div class="flex mb-4 space-x-2">
+            <input type="text" id="new-task-input" placeholder="Añade una tarea personalizada aquí..." class="flex-grow p-3 border border-gray-300 rounded-lg focus:ring-blue-500 focus:border-blue-500 text-sm">
+            <button id="add-task-btn" class="bg-blue-500 hover:bg-blue-600 text-white p-3 rounded-lg shadow-md transition duration-150 font-semibold">añadir</button>
+        </div>
+        <!-- Contenedor de tareas (cargado por JS/Firestore) -->
+        <div id="task-container" class="max-h-64 overflow-y-auto md:max-h-96">
+            <div class="text-center p-4">cargando tareas...</div>
+        </div>
+    </div>
+
+
+    <!-- Contenido Principal: Módulos de Progreso (Acordeones) -->
+    <div class="space-y-6 mb-20 md:mb-8">
+        
+        <h2 class="text-2xl font-bold text-gray-800 border-b pb-2">🎯 módulos de progreso autónomo (tu hoja de ruta)</h2>
+
+        <!-- MÓDULO 1: CONCEPTUALIZACIÓN -->
+        <div class="bg-white rounded-xl shadow-md overflow-hidden">
+            <button onclick="toggleAccordion('content-module-1')" class="w-full text-left p-4 font-semibold text-lg text-blue-700 bg-blue-100 hover:bg-blue-200 transition duration-150 flex justify-between items-center">
+                <span>módulo 1: conceptualización y mapeo inicial</span>
+                <span class="text-xl">▼</span>
+            </button>
+            <div class="p-4 pt-0 text-sm text-gray-600 bg-blue-50 border-b border-blue-200">
+                <p><strong>meta:</strong> establecer la base conceptual de tu PLE y analizar tus herramientas actuales.</p>
+            </div>
+            <div id="content-module-1" class="accordion-content p-4">
+                <h3 class="font-bold text-gray-700 mb-2">A. conceptualización (el porqué)</h3>
+                <ul class="list-disc list-inside space-y-1 ml-4 text-sm text-gray-600 mb-4">
+                    <li>**inicio con el vídeo:** visualiza el vídeo propuesto y reflexiona: ¿cómo pasas de un consumo pasivo de la red a una gestión activa y personal del aprendizaje?</li>
+                    <li>**definición de PLE, PLN y curación:** entiende la diferencia entre un LMS (plataforma cerrada) y el PLE (ecosistema distribuido y controlado por ti).</li>
+                </ul>
+                <h3 class="font-bold text-gray-700 mb-2">B. diagnóstico inicial (el punto de partida)</h3>
+                <ul class="list-disc list-inside space-y-1 ml-4 text-sm text-gray-600 mb-4">
+                    <li>**encuesta de estilo de aprendizaje digital:** completa un cuestionario para entender si eres más visual, textual, o si te distraes con facilidad.</li>
+                    <li>**primer borrador de PLE (mental):** escribe tu lista actual de "herramientas esenciales" (redes sociales, canales de YouTube) que ya uses para aprender.</li>
+                </ul>
+                <div class="mt-4 p-3 bg-green-100 rounded-lg border-l-4 border-green-500">
+                    <p class="font-semibold text-green-700">✅ hito de validación (meta 1): base conceptual establecida</p>
+                    <p class="text-sm text-green-600">debes ser capaz de describir, con tus propias palabras, la diferencia fundamental entre un LMS y un PLE, y clasificar tus herramientas actuales en las tres funciones del PLE (acceder/leer, hacer/reflexionar, relacionarse/compartir).</p>
+                </div>
+            </div>
+        </div>
+
+        <!-- MÓDULO 2: PLANIFICACIÓN Y DISEÑO DEL BLUEPRINT -->
+        <div class="bg-white rounded-xl shadow-md overflow-hidden">
+            <button onclick="toggleAccordion('content-module-2')" class="w-full text-left p-4 font-semibold text-lg text-blue-700 bg-blue-100 hover:bg-blue-200 transition duration-150 flex justify-between items-center">
+                <span>módulo 2: planificación estratégica y diseño del PLE</span>
+                <span class="text-xl">▼</span>
+            </button>
+            <div class="p-4 pt-0 text-sm text-gray-600 bg-blue-50 border-b border-blue-200">
+                <p><strong>meta:</strong> realiza los pasos 1, 2, 3 y 4 del "PLE Blueprint" (DAFO, SMART, mapeo y PLN).</p>
+            </div>
+            <div id="content-module-2" class="accordion-content p-4 space-y-4">
+                <h3 class="font-bold text-gray-700 mb-4 border-b pb-2">A. tareas de planificación</h3>
+                <p class="text-sm text-gray-600">consulta las secciones **1 a 4** del detalle del *blueprint* (abajo) para desarrollar:</p>
+                <ul class="list-disc list-inside ml-4 text-sm text-gray-700 space-y-1">
+                    <li>**1. diagnóstico personal (DAFO):** analiza tus fortalezas y debilidades digitales.</li>
+                    <li>**2. meta de aprendizaje SMART:** define tu objetivo principal.</li>
+                    <li>**3. mapeo del PLE:** selecciona tus herramientas de trabajo.</li>
+                    <li>**4. red personal de aprendizaje (PLN) curada:** selecciona tus fuentes fiables.</li>
+                </ul>
+
+                <div class="mt-6 p-3 bg-yellow-100 rounded-lg border-l-4 border-yellow-500">
+                    <p class="font-semibold text-yellow-700">⚠️ hito de validación (meta 2): planificación aprobada</p>
+                    <p class="text-sm text-yellow-600">debes haber completado los pasos 1 al 4. el docente actuará como tutor individual para validar la coherencia de tu plan antes de pasar al módulo 3.</p>
+                </div>
+            </div>
+        </div>
+        
+        <!-- MÓDULO 3: DOCUMENTACIÓN Y REFLEXIÓN -->
+        <div class="bg-white rounded-xl shadow-md overflow-hidden">
+            <button onclick="toggleAccordion('content-module-3')" class="w-full text-left p-4 font-semibold text-lg text-blue-700 bg-blue-100 hover:bg-blue-200 transition duration-150 flex justify-between items-center">
+                <span>módulo 3: documentación, puesta en práctica y reflexión final</span>
+                <span class="text-xl">▼</span>
+            </button>
+             <div class="p-4 pt-0 text-sm text-gray-600 bg-blue-50 border-b border-blue-200">
+                <p><strong>meta:</strong> formalizar el *blueprint*, implementarlo y realizar el análisis metacognitivo final (paso 5).</p>
+            </div>
+            <div id="content-module-3" class="accordion-content p-4 space-y-4">
+                
+                <h3 class="font-bold text-gray-700 mb-4 border-b pb-2">A. creación del PLE Blueprint (el producto)</h3>
+                <p class="text-sm text-gray-600 mb-4">utiliza una herramienta (google slides, canva, etc.) para formalizar y visualizar tu diseño completo (los 5 puntos del blueprint).</p>
+                
+                <h3 class="font-bold text-gray-700 mb-4 border-b pb-2">B. reflexión final</h3>
+                <p class="text-sm text-gray-600 mb-4">consulta la sección **5. diario de reflexión metacognitiva** (abajo) para realizar tu análisis crítico del proceso.</p>
+
+                <div class="mt-6 p-3 bg-red-100 rounded-lg border-l-4 border-red-500">
+                    <p class="font-semibold text-red-700">🏆 hito de finalización (meta 3): entrega final</p>
+                    <p class="text-sm text-red-600">entrega el PLE Blueprint completo y la reflexión metacognitiva. ¡has terminado tu proyecto de arquitecto de tu aprendizaje!</p>
+                </div>
+            </div>
+        </div>
+
+        <!-- Bloque 2: Detalle del PLE Blueprint (Acordeones Anidados) -->
+        <h2 class="text-2xl font-bold text-gray-800 border-b pb-2 pt-8">📝 detalle del "PLE Blueprint" (pasos 1 al 5)</h2>
+        <p class="text-gray-600 mb-4">consulta estas guías detalladas para realizar las tareas de planificación y reflexión.</p>
+
+        <!-- 1. DAFO DIGITAL -->
+        <div class="bg-white rounded-xl shadow-md overflow-hidden border border-gray-200">
+            <button onclick="toggleAccordion('blueprint-dafo')" class="w-full text-left p-4 font-semibold text-gray-800 hover:bg-gray-50 transition duration-150 flex justify-between items-center">
+                <span>1. diagnóstico personal: análisis FODA (DAFO) digital</span>
+                <span class="text-xl">▼</span>
+            </button>
+            <div id="blueprint-dafo" class="accordion-content p-4 text-sm">
+                <div class="flex items-start justify-between mb-3 border-b pb-2">
+                    <p class="mb-0 text-gray-600 flex-1">el DAFO te permite identificar de forma crítica tus fortalezas y debilidades digitales, así como las oportunidades y amenazas del entorno digital, para basar las decisiones del PLE en una estrategia de mejora personal.</p>
+                    <button onclick="toggleHelp('help-dafo')" class="bg-yellow-200 text-yellow-800 p-1 px-3 rounded-full text-xs font-bold hover:bg-yellow-300 flex-shrink-0 ml-4">💡 ayuda DAFO</button>
+                </div>
+                <!-- Ayuda contextual DAFO -->
+                <div id="help-dafo" class="hidden p-3 mb-4 bg-yellow-50 border-l-4 border-yellow-400 text-yellow-700 rounded-r-md">
+                    <p class="font-bold">¡recuerda que este es un ejercicio de honestidad digital!</p>
+                    <p class="text-xs mt-1">tu DAFO no es un examen; es tu mapa personal. si eres honesto con tus **debilidades** (ej. "me distraigo con tiktok"), podrás encontrar la **oportunidad** (ej. "usar apps de bloqueo") que tu PLE necesita. **cruzar el DAFO** significa usar fortalezas para aprovechar oportunidades y superar debilidades.</p>
+                </div>
+                <!-- Tarea -->
+                <div class="pt-3">
+                    <p class="font-semibold text-gray-700 mb-2">preguntas iniciales (para tu reflexión):</p>
+                    <ul class="list-disc list-inside ml-4 text-gray-600 space-y-1">
+                        <li>¿cómo gestionas la información de tus asignaturas? ¿tienes un sistema o es caótico?</li>
+                        <li>¿qué herramienta digital manejas mejor que el promedio? (fortaleza)</li>
+                        <li>¿qué te distrae más al estudiar online? (debilidad/amenaza)</li>
+                        <li>¿qué habilidad digital te gustaría adquirir en los próximos meses? (oportunidad)</li>
+                    </ul>
+                </div>
+                <!-- Pasos -->
+                <div class="border-t pt-3 mt-3">
+                    <p class="font-semibold text-gray-700 mb-2">pasos a seguir (la tarea de escritura):</p>
+                    <ol class="list-decimal list-inside ml-4 space-y-3 text-gray-600">
+                        <li>dibuja la matriz DAFO (4 cuadrantes).</li>
+                        <li>rellena la matriz con 3-4 ítems por cuadrante, enfocándote en tus hábitos de aprendizaje online.
+                            <div class="p-2 bg-yellow-50 text-yellow-700 rounded-md mt-2 text-xs italic">
+                                **ejemplos diversos:**
+                                <ul>
+                                    <li>**fuerza:** sé usar plantillas complejas en *notion* para organizar el temario. / manejo fluido de atajos de teclado.</li>
+                                    <li>**debilidad:** me cuesta concentrarme; reviso las redes cada 5 minutos. / no sé cómo almacenar de forma organizada los pdfs.</li>
+                                    <li>**oportunidad:** hay cursos *online* gratuitos de curación de contenidos (ej. *pocket* o *feedly*). / tengo acceso a una tablet con lápiz óptico.</li>
+                                    <li>**amenaza:** el 80% de las fuentes sobre mi tema en redes son bulos (infoxicación). / mis compañeros envían tareas por *whatsapp*.</li>
+                                </ul>
+                            </div>
+                        </li>
+                        <li>**cruza el DAFO:** identifica una debilidad que puedes mitigar con una oportunidad. **ejemplo:** "mi debilidad 'me distraigo con notificaciones' se mitiga con la oportunidad 'usar apps de productividad que bloquean apps' para crear un entorno de trabajo sin interrupciones."</li>
+                    </ol>
+                </div>
+                <!-- Autoevaluación -->
+                <div class="mt-3 p-3 bg-gray-100 rounded-lg">
+                    <p class="font-semibold text-gray-700 mb-1">autoevaluación:</p>
+                    <ul class="list-disc list-inside ml-4 text-xs text-gray-600">
+                        <li>¿cada elemento del DAFO está enfocado en mi vida digital y aprendizaje, no solo en mi personalidad general?</li>
+                        <li>¿he identificado al menos una debilidad que **mi nuevo PLE** debe solucionar?</li>
+                    </ul>
+                </div>
+            </div>
+        </div>
+        
+        <!-- 2. META SMART -->
+        <div class="bg-white rounded-xl shadow-md overflow-hidden border border-gray-200">
+            <button onclick="toggleAccordion('blueprint-meta')" class="w-full text-left p-4 font-semibold text-gray-800 hover:bg-gray-50 transition duration-150 flex justify-between items-center">
+                <span>2. meta de aprendizaje estratégica (SMART)</span>
+                <span class="text-xl">▼</span>
+            </button>
+            <div id="blueprint-meta" class="accordion-content p-4 text-sm">
+                <div class="flex items-start justify-between mb-3 border-b pb-2">
+                    <p class="mb-0 text-gray-600 flex-1">debes definir tu objetivo de aprendizaje de forma clara, medible y limitada en el tiempo, que servirá de eje central para el diseño de tu PLE.</p>
+                    <button onclick="toggleHelp('help-meta')" class="bg-green-200 text-green-800 p-1 px-3 rounded-full text-xs font-bold hover:bg-green-300 flex-shrink-0 ml-4">💡 ayuda SMART</button>
+                </div>
+                <!-- Ayuda contextual META SMART -->
+                <div id="help-meta" class="hidden p-3 mb-4 bg-green-50 border-l-4 border-green-400 text-green-700 rounded-r-md">
+                    <p class="font-bold">¡la clave está en ser específico y medible!</p>
+                    <p class="text-xs mt-1">una meta vaga es "quiero aprender a dibujar". una meta SMART es: "voy a ser capaz de dibujar 5 personajes en estilo pixel art (específico, medible) usando krita (alcanzable) para un proyecto de clase (relevante) antes del viernes de la próxima semana (temporal)."</p>
+                </div>
+                <!-- Tarea -->
+                <div class="pt-3">
+                    <p class="font-semibold text-gray-700 mb-2">preguntas iniciales (para tu reflexión):</p>
+                    <ul class="list-disc list-inside ml-4 text-gray-600 space-y-1">
+                        <li>considerando tu DAFO, ¿qué brecha de conocimiento o habilidad es la más urgente o motivadora para ti?</li>
+                        <li>¿cómo sabrás objetivamente que has alcanzado esa meta? ¿con un producto, una puntuación o una certificación?</li>
+                    </ul>
+                </div>
+                <!-- Pasos -->
+                <div class="border-t pt-3 mt-3">
+                    <p class="font-semibold text-gray-700 mb-2">pasos a seguir (la tarea de escritura):</p>
+                    <ol class="list-decimal list-inside ml-4 space-y-3 text-gray-600">
+                        <li>elige un tema específico (ej. "introducción a la programación en python", no solo "aprender python").</li>
+                        <li>define la meta usando el acrónimo SMART:
+                            <div class="p-2 bg-blue-50 text-blue-700 rounded-md mt-2 text-xs italic space-y-1">
+                                <ul>
+                                    <li>**e**specífica: ¿qué harás exactamente?</li>
+                                    <li>**m**edible: ¿cómo se cuantifica el éxito (5 personajes, 80% de aciertos, 1 proyecto final)?</li>
+                                    <li>**a**lcanzable: ¿es realista con tus recursos y tiempo actual?</li>
+                                    <li>**r**elevante: ¿por qué importa esta meta para ti o tus estudios?</li>
+                                    <li>**t**emporal: ¿cuándo debe estar completada (fecha límite clara)?</li>
+                                </ul>
+                                **ejemplo de meta (SMART):** "seré capaz de generar 10 imágenes artísticas y 5 textos coherentes usando un modelo de IA (ej. Gemini o Midjourney) en el plazo de **3 semanas**, para crear la base de mi portfolio digital."
+                            </div>
+                        </li>
+                        <li>redacta la meta en una sola frase clara.</li>
+                    </ol>
+                </div>
+                <!-- Autoevaluación -->
+                <div class="mt-3 p-3 bg-gray-100 rounded-lg">
+                    <p class="font-semibold text-gray-700 mb-1">autoevaluación:</p>
+                    <ul class="list-disc list-inside ml-4 text-xs text-gray-600">
+                        <li>¿si le enseñas esta meta a un compañero, él entendería exactamente qué vas a conseguir y cuándo?</li>
+                        <li>¿la meta está directamente relacionada con al menos una oportunidad identificada en tu DAFO?</li>
+                    </ul>
+                </div>
+            </div>
+        </div>
+
+        <!-- 3. MAPEO DEL PLE -->
+        <div class="bg-white rounded-xl shadow-md overflow-hidden border border-gray-200">
+            <button onclick="toggleAccordion('blueprint-mapeo')" class="w-full text-left p-4 font-semibold text-gray-800 hover:bg-gray-50 transition duration-150 flex justify-between items-center">
+                <span>3. mapeo del PLE: asignación de herramientas y recursos</span>
+                <span class="text-xl">▼</span>
+            </button>
+            <div id="blueprint-mapeo" class="accordion-content p-4 text-sm">
+                <div class="flex items-start justify-between mb-3 border-b pb-2">
+                    <p class="mb-0 text-gray-600 flex-1">crea un diagrama donde se relacionen las herramientas y fuentes de información (formales e informales) necesarias para alcanzar tu meta SMART.</p>
+                    <button onclick="toggleHelp('help-mapeo')" class="bg-indigo-200 text-indigo-800 p-1 px-3 rounded-full text-xs font-bold hover:bg-indigo-300 flex-shrink-0 ml-4">💡 ayuda mapeo</button>
+                </div>
+                <!-- Ayuda contextual MAPEO -->
+                <div id="help-mapeo" class="hidden p-3 mb-4 bg-indigo-50 border-l-4 border-indigo-400 text-indigo-700 rounded-r-md">
+                    <p class="font-bold">¡cada herramienta debe tener un trabajo!</p>
+                    <p class="text-xs mt-1">no listes tus 10 *apps* favoritas. pregúntate: ¿qué uso para **curar** (acceder)? ¿qué uso para **producir o guardar** (hacer)? ¿qué uso para **interactuar y validar** (relacionarse)? asegúrate de que las herramientas que ya usas resuelvan tus debilidades.</p>
+                </div>
+                <!-- Tarea -->
+                <div class="pt-3">
+                    <p class="font-semibold text-gray-700 mb-2">preguntas iniciales (para tu reflexión):</p>
+                    <ul class="list-disc list-inside ml-4 text-gray-600 space-y-1">
+                        <li>para alcanzar tu meta SMART, ¿qué necesitas *leer/consumir* (recursos)?</li>
+                        <li>¿qué necesitas *crear/reflexionar* (herramientas)?</li>
+                        <li>¿con quién necesitas *hablar/compartir* (PLN)?</li>
+                    </ul>
+                </div>
+                <!-- Pasos -->
+                <div class="border-t pt-3 mt-3">
+                    <p class="font-semibold text-gray-700 mb-2">pasos a seguir (la tarea de escritura):</p>
+                    <ol class="list-decimal list-inside ml-4 space-y-3 text-gray-600">
+                        <li>crea un mapa mental o diagrama visual con tres ramas principales (acceder/leer, hacer/reflexionar, relacionarse/compartir).</li>
+                        <li>rellena las tres categorías.
+                            <div class="p-2 bg-indigo-50 text-indigo-700 rounded-md mt-2 text-xs italic">
+                                **ejemplos detallados de herramientas por función:**
+                                <ul>
+                                    <li>**acceder / leer:** *feedly* (agregador de blogs y noticias), *youtube* (canales de tutoriales específicos), *biblioteca digital del centro*.</li>
+                                    <li>**hacer / reflexionar:** *notion* (gestión de notas y tareas), *gimp* (edición de imágenes), *miro* (mapas mentales y diagramas).</li>
+                                    <li>**relacionarse / compartir:** grupo de *discord* de programadores, foro *stack overflow*, *linkedin* (para contactar profesionales).</li>
+                                </ul>
+                            </div>
+                        </li>
+                        <li>asegúrate de que cada herramienta seleccionada soluciona una debilidad de tu DAFO o facilita un paso para tu meta SMART.</li>
+                    </ol>
+                </div>
+                <!-- Autoevaluación -->
+                <div class="mt-3 p-3 bg-gray-100 rounded-lg">
+                    <p class="font-semibold text-gray-700 mb-1">autoevaluación:</p>
+                    <ul class="list-disc list-inside ml-4 text-xs text-gray-600">
+                        <li>¿has seleccionado intencionadamente herramientas que no usabas antes para mejorar tu proceso?</li>
+                        <li>¿podrías eliminar alguna herramienta de tu mapa sin que afecte el logro de tu meta SMART? si la respuesta es sí, ¡elimínala!</li>
+                    </ul>
+                </div>
+            </div>
+        </div>
+
+        <!-- 4. PLN CURADA -->
+        <div class="bg-white rounded-xl shadow-md overflow-hidden border border-gray-200">
+            <button onclick="toggleAccordion('blueprint-pln')" class="w-full text-left p-4 font-semibold text-gray-800 hover:bg-gray-50 transition duration-150 flex justify-between items-center">
+                <span>4. red personal de aprendizaje (PLN) curada</span>
+                <span class="text-xl">▼</span>
+            </button>
+            <div id="blueprint-pln" class="accordion-content p-4 text-sm">
+                <div class="flex items-start justify-between mb-3 border-b pb-2">
+                    <p class="mb-0 text-gray-600 flex-1">identifica y selecciona proactivamente a las personas, canales o comunidades de las que aprendes, justificando su fiabilidad y relevancia para tu meta establecida.</p>
+                    <button onclick="toggleHelp('help-pln')" class="bg-red-200 text-red-800 p-1 px-3 rounded-full text-xs font-bold hover:bg-red-300 flex-shrink-0 ml-4">💡 ayuda PLN</button>
+                </div>
+                <!-- Ayuda contextual PLN -->
+                <div id="help-pln" class="hidden p-3 mb-4 bg-red-50 border-l-4 border-red-400 text-red-700 rounded-r-md">
+                    <p class="font-bold">¡tu PLN debe ser un filtro de calidad, no una fuente de ruido!</p>
+                    <p class="text-xs mt-1">no te limites a seguir a personas populares. pregúntate: ¿citan sus fuentes? ¿tienen experiencia comprobable en el tema? elige un PLN pequeño, experto y de confianza, y planifica cómo vas a interactuar para validar tu conocimiento (estrategia de interacción).</p>
+                </div>
+                <!-- Tarea -->
+                <div class="pt-3">
+                    <p class="font-semibold text-gray-700 mb-2">preguntas iniciales (para tu reflexión):</p>
+                    <ul class="list-disc list-inside ml-4 text-gray-600 space-y-1">
+                        <li>¿quiénes son los 3 expertos o canales más fiables en el tema de tu meta SMART?</li>
+                        <li>¿cómo vas a interactuar con ellos (solo leer o también preguntar/compartir)?</li>
+                    </ul>
+                </div>
+                <!-- Pasos -->
+                <div class="border-t pt-3 mt-3">
+                    <p class="font-semibold text-gray-700 mb-2">pasos a seguir (la tarea de escritura):</p>
+                    <ol class="list-decimal list-inside ml-4 space-y-3 text-gray-600">
+                        <li>identifica 3-5 fuentes (personas, foros, *influencers*, grupos) relevantes para tu meta.
+                            <div class="p-2 bg-red-50 text-red-700 rounded-md mt-2 text-xs italic">
+                                **ejemplos diversos de PLN:**
+                                <ul>
+                                    <li>*canal de youtube "techreview"* (por la calidad de sus demostraciones prácticas).</li>
+                                    <li>*comunidad "pydevs" en discord* (para resolver dudas técnicas puntuales).</li>
+                                    <li>*profesor de la universidad y en linkedin* (publica artículos académicos que validan mi conocimiento).</li>
+                                </ul>
+                            </div>
+                        </li>
+                        <li>investiga su fiabilidad (¿comparten fuentes? ¿son profesionales? ¿son activos?).</li>
+                        <li>documenta: nombre/canal, plataforma, y **por qué lo eliges** (su justificación de fiabilidad: ej. "publica código abierto y cita referencias").</li>
+                        <li>define una **estrategia de interacción** (ej. "solo leeré sus publicaciones" o "participaré semanalmente en el foro X para responder dudas sencillas").</li>
+                    </ol>
+                </div>
+                <!-- Autoevaluación -->
+                <div class="mt-3 p-3 bg-gray-100 rounded-lg">
+                    <p class="font-semibold text-gray-700 mb-1">autoevaluación:</p>
+                    <ul class="list-disc list-inside ml-4 text-xs text-gray-600">
+                        <li>¿cada miembro de tu PLN es un experto en tu meta SMART?</li>
+                        <li>¿he justificado por qué estas fuentes son más fiables que las que uso para mi ocio?</li>
+                    </ul>
+                </div>
+            </div>
+        </div>
+        
+        <!-- 5. DIARIO REFLEXIÓN -->
+        <div class="bg-white rounded-xl shadow-md overflow-hidden border border-gray-200">
+            <button onclick="toggleAccordion('blueprint-diario')" class="w-full text-left p-4 font-semibold text-gray-800 hover:bg-gray-50 transition duration-150 flex justify-between items-center">
+                <span>5. diario de reflexión metacognitiva</span>
+                <span class="text-xl">▼</span>
+            </button>
+            <div id="blueprint-diario" class="accordion-content p-4 text-sm">
+                <div class="flex items-start justify-between mb-3 border-b pb-2">
+                    <p class="mb-0 text-gray-600 flex-1">un registro crítico donde evaluarás la eficacia de las herramientas y la estrategia del PLE una vez implementado. responde a la pregunta de **"cómo he aprendido"**.</p>
+                    <button onclick="toggleHelp('help-diario')" class="bg-pink-200 text-pink-800 p-1 px-3 rounded-full text-xs font-bold hover:bg-pink-300 flex-shrink-0 ml-4">💡 ayuda diario</button>
+                </div>
+                <!-- Ayuda contextual DIARIO -->
+                <div id="help-diario" class="hidden p-3 mb-4 bg-pink-50 border-l-4 border-pink-400 text-pink-700 rounded-r-md">
+                    <p class="font-bold">¡la reflexión es el motor de la mejora continua!</p>
+                    <p class="text-xs mt-1">este no es un diario de tareas (para eso está el rastreador). es un diario de **estrategia**. sé duro contigo mismo: ¿la herramienta x falló o falló mi forma de usarla? ¿qué haría diferente si empezara de nuevo? las respuestas aquí son tu aprendizaje más valioso.</p>
+                </div>
+                <!-- Tarea -->
+                <div class="pt-3">
+                    <p class="font-semibold text-gray-700 mb-2">preguntas iniciales (para tu reflexión):</p>
+                    <ul class="list-disc list-inside ml-4 text-gray-600 space-y-1">
+                        <li>durante el proceso de aprendizaje, ¿qué me está resultando más difícil: la meta, las herramientas o la motivación?</li>
+                        <li>¿la herramienta que elegí para la función "hacer/reflexionar" está siendo realmente eficaz?</li>
+                    </ul>
+                </div>
+                <!-- Pasos -->
+                <div class="border-t pt-3 mt-3">
+                    <p class="font-semibold text-gray-700 mb-2">pasos a seguir (la tarea de escritura):</p>
+                    <ol class="list-decimal list-inside ml-4 space-y-3 text-gray-600">
+                        <li>**pre-análisis:** antes de empezar, registra tus expectativas sobre el PLE.</li>
+                        <li>**durante el proceso (registro semanal):** dedica 10 minutos semanales a responder: "¿qué funcionó bien esta semana? ¿qué recurso me hizo perder el tiempo? ¿por qué?".
+                            <div class="p-2 bg-pink-50 text-pink-700 rounded-md mt-2 text-xs italic">
+                                **ej. entrada crítica:** "la herramienta x (ej. notion) fue demasiado compleja para mí al principio; perdí dos horas intentando organizarlo todo. para la próxima meta, debo buscar un tutorial inicial."
+                            </div>
+                        </li>
+                        <li>**post-análisis (final):** responde a las 4 preguntas de la sección B del módulo 3 (evaluación de la meta, eficacia de las herramientas, estrategia de PLN, lección aprendida).</li>
+                    </ol>
+                </div>
+                <!-- Autoevaluación -->
+                <div class="mt-3 p-3 bg-gray-100 rounded-lg">
+                    <p class="font-semibold text-gray-700 mb-1">autoevaluación:</p>
+                    <ul class="list-disc list-inside ml-4 text-xs text-gray-600">
+                        <li>¿mi diario incluye análisis crítico y no solo descripción de tareas?</li>
+                        <li>¿he identificado al menos un cambio estructural que haré en mi PLE después de esta experiencia?</li>
+                    </ul>
+                </div>
+            </div>
+        </div>
+    </div>
+
+    <!-- Espacio para evitar que el contenido sea ocultado por el task tracker fixed -->
+    <div class="h-32 md:h-16"></div> 
+
+</body>
+</html>
